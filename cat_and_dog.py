@@ -4,6 +4,7 @@ import os
 import time
 from tqdm import tqdm
 from urllib.parse import quote
+import sys
 
 class YandexDisk:
     BASE_URL = 'https://cloud-api.yandex.net/v1/disk/resources'
@@ -16,191 +17,312 @@ class YandexDisk:
         }
 
     def create_folder(self, path):
-        # Создание папки на Яндекс.Диске
-        url = self.BASE_URL
-        params = {'path': path}
-        response = requests.put(url, headers=self.headers, params=params)
-        return response.status_code in [201, 409]  # 201 - создана, 409 - уже существует
+        """Создание папки на Яндекс.Диске с обработкой ошибок"""
+        try:
+            url = self.BASE_URL
+            params = {'path': path}
+            response = requests.put(url, headers=self.headers, params=params, timeout=10)
+
+            if response.status_code in [201, 409]:  # 201 - создана, 409 - уже существует
+                return True
+            else:
+                print(f"Ошибка при создании папки: {response.json().get('message', 'Неизвестная ошибка')}")
+                return False
+        except requests.exceptions.RequestException as e:
+            print(f"Сетевая ошибка при создании папки: {e}")
+            return False
 
     def upload_from_url(self, url, path):
-        # Загрузка файла на Яндекс.Диск
-        upload_url = f'{self.BASE_URL}/upload'
-        params = {'url': url, 'path': path}
-        response = requests.post(upload_url, headers=self.headers, params=params)
-        return response.json()
+        """Загрузка файла на Яндекс.Диск с обработкой ошибок"""
+        try:
+            upload_url = f'{self.BASE_URL}/upload'
+            params = {'url': url, 'path': path}
+            response = requests.post(upload_url, headers=self.headers, params=params, timeout=30)
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Сетевая ошибка при загрузке файла: {e}")
+            return {'error': str(e)}
 
 def clean_filename(name):
-    # Очистка имени файла от недопустимых символов
+    """Очистка имени файла от недопустимых символов"""
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         name = name.replace(char, '')
+    # Ограничиваем длину имени файла
+    if len(name) > 100:
+        name = name[:100]
     return name
 
-def get_cat_image(text):
-    # Получение изображения кота
-    try:
-        encoded_text = quote(text)
-        url = f'https://cataas.com/cat/says/{encoded_text}?json=true'
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            image_path = data.get('url', '')
+def get_cat_images(text, count=1):
+    """Получение нескольких изображений кошек с текстом"""
+    images = []
 
-            if image_path.startswith('http'):
-                image_url = image_path
+    for i in range(count):
+        try:
+            encoded_text = quote(text)
+            url = f'https://cataas.com/cat/says/{encoded_text}?json=true'
+            response = requests.get(url, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                image_path = data.get('url', '')
+
+                if image_path.startswith('http'):
+                    image_url = image_path
+                else:
+                    image_url = f'https://cataas.com{image_path}'
+
+                # Получаем размер изображения
+                try:
+                    head_response = requests.head(image_url, timeout=10)
+                    size = head_response.headers.get('Content-Length', 0)
+                except Exception as e:
+                    print(f'Ошибка при получении размера изображения: {e}')
+                    size = 0
+
+                # Создаем уникальное имя файла для каждого изображения
+                filename_suffix = f"_{i+1}" if count > 1 else ""
+                file_name = clean_filename(text) + filename_suffix + '.jpg'
+
+                images.append({
+                    'url': image_url,
+                    'size': size,
+                    'name': file_name
+                })
             else:
-                image_url = f'https://cataas.com{image_path}'
+                print(f"Ошибка API cataas.com: {response.status_code}")
 
-            # Получаем размер изображения
-            try:
-                head_response = requests.head(image_url, timeout=10)
-                size = head_response.headers.get('Content-Length', 0)
-            except Exception as e:
-                print(f'Ошибка при получении размера изображения: {e}')
-                size = 0
+        except Exception as e:
+            print(f'Ошибка при получении изображения кота: {e}')
 
-            return {
-                'url': image_url,
-                'size': size,
-                'name': clean_filename(text) + '.jpg'
-            }
-    except Exception as e:
-        print(f'Ошибка при получении изображения кота: {e}')
-    return None
+        # Небольшая задержка между запросами
+        if i < count - 1:
+            time.sleep(1)
 
-def get_dog_images(breed):
-    # Получение изображений собаки указанной породы
+    return images
+
+def get_dog_images(breed, count_per_breed=1):
+    """Получение изображений собак указанной породы"""
+    images = []
+
     try:
+        # Получаем список подпород
         response = requests.get(f'https://dog.ceo/api/breed/{breed}/list', timeout=10)
         if response.status_code != 200:
+            print(f"Ошибка при получении списка пород: {response.status_code}")
             return []
 
         sub_breeds = response.json().get('message', [])
-        images = []
 
-        # Основная порода
-        if not sub_breeds:
-            response = requests.get(f'https://dog.ceo/api/breed/{breed}/images/random', timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                images.append({
-                    'url': data['message'],
-                    'sub_breed': None,
-                    'breed': breed
-                })
-        else:
-            # Подпороды
-            for sub_breed in sub_breeds:
-                response = requests.get(f'https://dog.ceo/api/breed/{breed}/{sub_breed}/images/random', timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    images.append({
-                        'url': data['message'],
-                        'sub_breed': sub_breed,
-                        'breed': breed
-                    })
-        return images
+        # Если нет подпород, работаем с основной породой
+        breeds_to_process = [breed] if not sub_breeds else [f"{breed}/{sub_breed}" for sub_breed in sub_breeds]
+
+        # Для каждой породы/подпороды получаем указанное количество изображений
+        for current_breed in breeds_to_process:
+            for i in range(count_per_breed):
+                try:
+                    response = requests.get(f'https://dog.ceo/api/breed/{current_breed}/images/random', timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+
+                        # Определяем, является ли текущая порода подпородой
+                        breed_parts = current_breed.split('/')
+                        main_breed = breed_parts[0]
+                        sub_breed = breed_parts[1] if len(breed_parts) > 1 else None
+
+                        # Получаем размер изображения
+                        try:
+                            head_response = requests.head(data['message'], timeout=10)
+                            size = head_response.headers.get('Content-Length', 0)
+                        except Exception as e:
+                            print(f'Ошибка при получении размера изображения: {e}')
+                            size = 0
+
+                        # Формируем имя файла
+                        base_name = os.path.basename(data['message'])
+                        if sub_breed:
+                            file_name = f"{main_breed}_{sub_breed}_{i+1}_{base_name}"
+                        else:
+                            file_name = f"{main_breed}_{i+1}_{base_name}"
+
+                        images.append({
+                            'url': data['message'],
+                            'size': size,
+                            'name': clean_filename(file_name),
+                            'breed': main_breed,
+                            'sub_breed': sub_breed
+                        })
+                    else:
+                        print(f"Ошибка API dog.ceo для породы {current_breed}: {response.status_code}")
+
+                except Exception as e:
+                    print(f'Ошибка при получении изображения собаки: {e}')
+
+                # Небольшая задержка между запросами
+                if i < count_per_breed - 1 or current_breed != breeds_to_process[-1]:
+                    time.sleep(0.5)
+
     except Exception as e:
-        print(f'Ошибка при получении изображений собак: {e}')
-        return []
+        print(f'Общая ошибка при получении изображений собак: {e}')
+
+    return images
+
+def print_header():
+    """Вывод заголовка программы"""
+    print("=" * 50)
+    print("       РЕЗЕРВНОЕ КОПИРОВАНИЕ ИЗОБРАЖЕНИЙ")
+    print("=" * 50)
+    print()
+
+def print_menu():
+    """Вывод меню выбора"""
+    print("Выберите задание:")
+    print("1. Кошки (cataas.com)")
+    print("2. Собаки (dog.ceo)")
+    print("3. Выход")
+    print()
+
+def get_user_choice():
+    """Получение выбора пользователя с проверкой"""
+    while True:
+        try:
+            choice = input("Введите номер задания (1-3): ")
+            if choice in ['1', '2', '3']:
+                return choice
+            else:
+                print("Пожалуйста, введите число от 1 до 3.")
+        except KeyboardInterrupt:
+            print("\nПрограмма прервана пользователем.")
+            sys.exit(0)
+
+def get_number_input(prompt, default=1, min_val=1, max_val=50):
+    """Получение числового ввода от пользователя с проверкой"""
+    while True:
+        try:
+            value = input(f"{prompt} (по умолчанию {default}): ")
+            if not value:
+                return default
+            value = int(value)
+            if min_val <= value <= max_val:
+                return value
+            else:
+                print(f"Пожалуйста, введите число от {min_val} до {max_val}.")
+        except ValueError:
+            print("Пожалуйста, введите целое число.")
+        except KeyboardInterrupt:
+            print("\nПрограмма прервана пользователем.")
+            sys.exit(0)
 
 def main():
-    results = []
-    print('Выберите задание:')
-    print('1. Кошки(cataas.com)')
-    print('2. Собаки(dog.ceo)')
+    """Основная функция программы"""
+    print_header()
 
-    choice = input('Введите номер задания (1 или 2): ')
-    token = input('Введите токен для Яндекс.Диска: ')
-    yandex = YandexDisk(token)
+    while True:
+        print_menu()
+        choice = get_user_choice()
 
-    if choice == '1':
-        # Кошки
-        group_id = input('Введите название группы: ')
-        text = input('Введите текст для картинки с котиком: ')
+        if choice == '3':
+            print("Выход из программы.")
+            break
 
-        # Создание папки на Яндекс.Диске
-        if not yandex.create_folder(group_id):
-            print('Ошибка при создании папки')
-            return
+        token = input("Введите токен для Яндекс.Диска: ")
+        if not token:
+            print("Токен не может быть пустым.")
+            continue
 
-        # Получение изображения кота
-        image_info = get_cat_image(text)
-        if not image_info:
-            print('Не удалось получить изображение кота')
-            return
+        yandex = YandexDisk(token)
+        results = []
 
-        # Загрузка изображения на Яндекс.Диск
-        path = f'{group_id}/{image_info["name"]}'
-        upload_result = yandex.upload_from_url(image_info['url'], path)
+        if choice == '1':
+            # Обработка кошек
+            group_id = input("Введите название группы: ")
+            text = input("Введите текст для картинки с котиком: ")
+            count = get_number_input("Сколько изображений загрузить?", 1, 1, 20)
 
-        if 'error' not in upload_result:
-            results.append({
-                'file_name': image_info['name'],
-                'size': image_info['size'],
-                'path': path
-            })
-            print(f'Файл {image_info["name"]} загружен на Яндекс.Диск')
+            # Создание папки на Яндекс.Диске
+            if not yandex.create_folder(group_id):
+                print("Не удалось создать папку. Проверьте токен и права доступа.")
+                continue
+
+            # Получение изображений кошек
+            print(f"Получаем {count} изображений кошек...")
+            images = get_cat_images(text, count)
+
+            if not images:
+                print("Не удалось получить изображения кошек.")
+                continue
+
+            # Загрузка изображений на Яндекс.Диск
+            print(f"Загружаем {len(images)} изображений на Яндекс.Диск...")
+            for image in tqdm(images, desc="Загрузка изображений"):
+                path = f'{group_id}/{image["name"]}'
+                upload_result = yandex.upload_from_url(image['url'], path)
+
+                if 'error' not in upload_result:
+                    results.append({
+                        'file_name': image['name'],
+                        'size': image['size'],
+                        'path': path
+                    })
+                else:
+                    print(f"Ошибка при загрузке файла {image['name']}: {upload_result.get('error', 'Неизвестная ошибка')}")
+
+        elif choice == '2':
+            # Обработка собак
+            breed = input("Введите породу собаки на английском языке: ")
+            count = get_number_input("Сколько изображений для каждой породы/подпороды загрузить?", 1, 1, 10)
+
+            # Создание папки на Яндекс.Диске
+            if not yandex.create_folder(breed):
+                print("Не удалось создать папку. Проверьте токен и права доступа.")
+                continue
+
+            # Получение изображений собак
+            print(f"Получаем изображения породы {breed}...")
+            images = get_dog_images(breed, count)
+
+            if not images:
+                print(f"Не удалось найти изображения породы {breed}.")
+                continue
+
+            # Загрузка изображений на Яндекс.Диск
+            print(f"Загружаем {len(images)} изображений на Яндекс.Диск...")
+            for image in tqdm(images, desc="Загрузка изображений"):
+                path = f'{breed}/{image["name"]}'
+                upload_result = yandex.upload_from_url(image['url'], path)
+
+                if 'error' not in upload_result:
+                    results.append({
+                        'file_name': image['name'],
+                        'size': image['size'],
+                        'path': path,
+                        'breed': image.get('breed', ''),
+                        'sub_breed': image.get('sub_breed', '')
+                    })
+                else:
+                    print(f"Ошибка при загрузке файла {image['name']}: {upload_result.get('error', 'Неизвестная ошибка')}")
+
+        # Сохранение результатов в JSON
+        if results:
+            try:
+                with open('results.json', 'w', encoding='utf-8') as f:
+                    json.dump(results, f, indent=2, ensure_ascii=False)
+                print(f"Результаты сохранены в файл results.json ({len(results)} записей).")
+            except Exception as e:
+                print(f"Ошибка при сохранении результатов: {e}")
         else:
-            print(f'Ошибка при загрузке файла {image_info["name"]}: {upload_result["error"]}')
+            print("Нет результатов для сохранения.")
 
-        # Сохранение результатов в json
-        with open('results.json', 'w') as f:
-            json.dump(results, f, indent=2)
-        print('Результаты сохранены в results.json')
-
-    elif choice == '2':
-        # Собаки
-        breed = input('Введите породу собаки: ')
-
-        # Создание папки на Яндекс.Диске
-        if not yandex.create_folder(breed):
-            print('Ошибка при создании папки')
-            return
-
-        # Получение изображений собаки
-        images = get_dog_images(breed)
-        if not images:
-            print('Не удалось найти изображения указанной породы')
-            return
-
-        print(f'Найдено {len(images)} изображений:')
-
-        # Загрузка изображений на Яндекс.Диск
-        for image in tqdm(images, desc='Загрузка изображений'):
-            if image['sub_breed']:
-                file_name = f"{image['breed']}_{image['sub_breed']}_{os.path.basename(image['url'])}"
-            else:
-                file_name = f"{image['breed']}_{os.path.basename(image['url'])}"
-
-            filename = clean_filename(file_name)
-            path = f'{breed}/{filename}'
-
-            upload_result = yandex.upload_from_url(image['url'], path)
-
-            if 'error' not in upload_result:
-                # Получение размера файла
-                try:
-                    size_response = requests.head(image['url'], timeout=10)
-                    size = size_response.headers.get('Content-Length', 0)
-                except Exception as e:
-                    print(f'Ошибка при получении размера файла: {e}')
-                    size = 0
-
-                results.append({
-                    'file_name': filename,
-                    'size': int(size),
-                    'path': path,
-                    'breed': image['breed'],
-                    'sub_breed': image['sub_breed']
-                })
-
-            time.sleep(1)  # Задержка между запросами
-
-        # Сохранение результатов в json
-        with open('results.json', 'w') as f:
-            json.dump(results, f, indent=2)
-        print('Результаты сохранены в results.json')
+        print()
+        continue_input = input("Хотите выполнить еще одну операцию? (y/n): ")
+        if continue_input.lower() != 'y':
+            print("Выход из программы.")
+            break
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nПрограмма прервана пользователем.")
+    except Exception as e:
+        print(f"Неожиданная ошибка: {e}")
